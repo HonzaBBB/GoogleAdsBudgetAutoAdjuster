@@ -37,7 +37,10 @@ const CONFIG = {
   LOOKBACK_DAYS: 14,
   
   // Email pro notifikace (prázdný = bez emailu)
-  NOTIFICATION_EMAIL: 'vas@email.cz'
+  NOTIFICATION_EMAIL: 'vas@email.cz',
+
+ // Minimální budget - pod tuto hodnotu script budget nesníží (v Kč)
+  MIN_BUDGET: 160
 };
 ```
 
