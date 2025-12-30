@@ -27,7 +27,10 @@ const CONFIG = {
   LOOKBACK_DAYS: 14,
   
   // Email pro notifikace (prázdný = bez emailu)
-  NOTIFICATION_EMAIL: 'TVUJ.EMAIL@GMAIL.COM'
+  NOTIFICATION_EMAIL: 'tvuj.mail@gmail.com',
+   
+  // Minimální budget - pod tuto hodnotu script budget nesníží (v Kč)
+  MIN_BUDGET: 160
 };
 
 function main() {
@@ -67,7 +70,8 @@ function main() {
     
     // === SNÍŽENÍ ===
     else if (data.avgDailySpend < data.dailyBudget * CONFIG.UNDERSPEND_THRESHOLD) {
-      const newBudget = data.avgDailySpend * CONFIG.DECREASE_BUFFER;
+      
+      const newBudget = Math.max(data.avgDailySpend * CONFIG.DECREASE_BUFFER, CONFIG.MIN_BUDGET);
       
       // Snížit jen pokud je nový budget výrazně nižší
       if (newBudget < data.dailyBudget * 0.95) {
