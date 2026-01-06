@@ -10,7 +10,7 @@
  * SNÍŽÍ budget (actual spend + 20%) když:
  * - Spend < 70% budgetu za posledních 14 dní
  * 
- * @version 2.0 (MCC)
+ * @version 2.1 (MCC + Central Logging)
  * @author Honza Brzák
  * @email janbrzak.prg@gmail.com
  */
@@ -46,19 +46,24 @@ const CONFIG = {
   // Minimální budget - pod tuto hodnotu script budget nesníží (v CZK)
   MIN_BUDGET: 160,
   
-  // Label pro označení upravených kampaní (pro tracking)
-  ADJUSTMENT_LABEL: 'BudgetAdjusted'
+  // Centrální log sheet URL (prázdný = bez logování do sheetu)
+  CENTRAL_LOG_SHEET: 'https://docs.google.com/spreadsheets/d/XXXXX/edit',
+  
+  // Název tohoto scriptu (pro identifikaci v logu)
+  SCRIPT_NAME: 'BudgetAdjuster'
 };
 
 // ============ MAIN ============
 function main() {
+  const startTime = new Date();
   Logger.log('=== Budget Auto-Adjuster (MCC) ===');
-  Logger.log(`Datum: ${new Date().toLocaleString('cs-CZ')}`);
+  Logger.log(`Datum: ${startTime.toLocaleString('cs-CZ')}`);
   Logger.log(`Počet účtů k zpracování: ${CONFIG.MONITORED_ACCOUNTS.length}`);
   
   const allChanges = [];
   let accountsProcessed = 0;
   let accountsWithChanges = 0;
+  let errors = 0;
   
   // Získání účtů z MCC
   const accountIterator = AdsManagerApp.accounts()
@@ -78,22 +83,39 @@ function main() {
     AdsManagerApp.select(account);
     
     // Zpracování účtu
-    const changes = processAccount(accountName, customerId);
-    
-    accountsProcessed++;
-    if (changes.length > 0) {
-      accountsWithChanges++;
-      allChanges.push(...changes);
+    try {
+      const changes = processAccount(accountName, customerId);
+      
+      accountsProcessed++;
+      if (changes.length > 0) {
+        accountsWithChanges++;
+        allChanges.push(...changes);
+      } else {
+        // Log že účet byl zpracován bez změn
+        logAction(customerId, accountName, 'NO_CHANGE', '-', '-', '-', 'Všechny kampaně OK', 'INFO');
+      }
+    } catch (e) {
+      errors++;
+      Logger.log(`CHYBA při zpracování účtu: ${e.message}`);
+      logAction(customerId, accountName, 'ERROR', '-', '-', '-', e.message, 'ERROR');
     }
   }
   
   // Souhrn
+  const endTime = new Date();
+  const duration = Math.round((endTime - startTime) / 1000);
+  
   Logger.log(`\n${'='.repeat(50)}`);
   Logger.log('SOUHRN');
   Logger.log('='.repeat(50));
   Logger.log(`Zpracováno účtů: ${accountsProcessed}`);
   Logger.log(`Účtů se změnami: ${accountsWithChanges}`);
   Logger.log(`Celkem změn: ${allChanges.length}`);
+  Logger.log(`Chyb: ${errors}`);
+  Logger.log(`Doba běhu: ${duration}s`);
+  
+  // Log běhu scriptu
+  logScriptRun(accountsProcessed, allChanges.length, errors, duration);
   
   // Odeslání notifikace
   if (allChanges.length > 0 && CONFIG.NOTIFICATION_EMAIL) {
@@ -101,6 +123,93 @@ function main() {
   }
   
   Logger.log('\n=== Hotovo ===');
+}
+
+// ============ CENTRAL LOGGING ============
+
+/**
+ * Zaloguje jednotlivou akci do Execution Log sheetu
+ */
+function logAction(accountId, accountName, action, entity, oldValue, newValue, reason, status) {
+  if (!CONFIG.CENTRAL_LOG_SHEET) return;
+  
+  try {
+    const sheet = SpreadsheetApp.openByUrl(CONFIG.CENTRAL_LOG_SHEET).getSheetByName('Execution Log');
+    if (!sheet) {
+      Logger.log('WARN: Sheet "Execution Log" nenalezen');
+      return;
+    }
+    
+    sheet.appendRow([
+      new Date(),
+      CONFIG.SCRIPT_NAME,
+      accountId,
+      accountName,
+      action,
+      entity,
+      oldValue,
+      newValue,
+      reason,
+      status
+    ]);
+    
+    // Podmíněné formátování poslední řádky
+    const lastRow = sheet.getLastRow();
+    const range = sheet.getRange(lastRow, 1, 1, 10);
+    
+    if (status === 'SUCCESS') {
+      range.setBackground('#d9ead3');
+    } else if (status === 'ERROR') {
+      range.setBackground('#f4cccc');
+    } else if (status === 'WARNING') {
+      range.setBackground('#fff2cc');
+    } else if (status === 'INFO') {
+      range.setBackground('#efefef');
+    }
+    
+  } catch (e) {
+    Logger.log(`WARN: Nepodařilo se logovat do sheetu: ${e.message}`);
+  }
+}
+
+/**
+ * Zaloguje běh scriptu do Script Runs sheetu
+ */
+function logScriptRun(accountsProcessed, actionsTaken, errors, duration) {
+  if (!CONFIG.CENTRAL_LOG_SHEET) return;
+  
+  try {
+    const sheet = SpreadsheetApp.openByUrl(CONFIG.CENTRAL_LOG_SHEET).getSheetByName('Script Runs');
+    if (!sheet) {
+      Logger.log('WARN: Sheet "Script Runs" nenalezen');
+      return;
+    }
+    
+    const status = errors > 0 ? 'ERROR' : 'SUCCESS';
+    
+    sheet.appendRow([
+      new Date(),
+      CONFIG.SCRIPT_NAME,
+      accountsProcessed,
+      actionsTaken,
+      errors,
+      duration,
+      status
+    ]);
+    
+    // Podmíněné formátování
+    const lastRow = sheet.getLastRow();
+    const range = sheet.getRange(lastRow, 1, 1, 7);
+    
+    if (status === 'SUCCESS') {
+      range.setBackground('#d9ead3');
+    } else {
+      range.setBackground('#f4cccc');
+    }
+    
+  } catch (e) {
+    Logger.log(`WARN: Nepodařilo se logovat běh scriptu: ${e.message}`);
+  }
 }
 
 // ============ PROCESS ACCOUNT ============
@@ -124,9 +233,13 @@ function processAccount(accountName, customerId) {
     Logger.log(`  PNO: ${data.pno !== null ? (data.pno * 100).toFixed(1) + '%' : 'N/A'}`);
     Logger.log(`  Budget Constrained: ${data.isBudgetConstrained}`);
     
+    const typeLabel = data.campaignType === 'PERFORMANCE_MAX' ? ' [PMAX]' : '';
+    const entityName = `Campaign: ${data.name}${typeLabel}`;
+    
     // === ZVÝŠENÍ ===
     if (data.isBudgetConstrained && data.pno !== null && data.pno < CONFIG.MAX_PNO_FOR_INCREASE / 100) {
       const newBudget = data.dailyBudget * CONFIG.INCREASE_MULTIPLIER;
+      const reason = `Budget Constrained + PNO ${(data.pno * 100).toFixed(1)}%`;
       
       Logger.log(`  -> ZVÝŠENÍ: ${data.dailyBudget.toFixed(0)} -> ${newBudget.toFixed(0)} CZK (+30%)`);
       
@@ -141,8 +254,31 @@ function processAccount(accountName, customerId) {
           action: 'INCREASE',
           oldBudget: data.dailyBudget,
           newBudget: newBudget,
-          reason: `Budget Constrained + PNO ${(data.pno * 100).toFixed(1)}%`
+          reason: reason
         });
+        
+        // Log do centrálního sheetu
+        logAction(
+          customerId,
+          accountName,
+          'BUDGET_INCREASE',
+          entityName,
+          data.dailyBudget.toFixed(0),
+          newBudget.toFixed(0),
+          reason,
+          'SUCCESS'
+        );
+      } else {
+        logAction(
+          customerId,
+          accountName,
+          'BUDGET_INCREASE',
+          entityName,
+          data.dailyBudget.toFixed(0),
+          newBudget.toFixed(0),
+          'Nepodařilo se změnit budget',
+          'ERROR'
+        );
       }
     }
     
@@ -152,6 +288,8 @@ function processAccount(accountName, customerId) {
       
       // Snížit jen pokud je nový budget výrazně nižší
       if (newBudget < data.dailyBudget * 0.95) {
+        const reason = `Underspend: avg ${data.avgDailySpend.toFixed(0)} CZK/den (${((data.avgDailySpend / data.dailyBudget) * 100).toFixed(0)}% budgetu)`;
+        
         Logger.log(`  -> SNÍŽENÍ: ${data.dailyBudget.toFixed(0)} -> ${newBudget.toFixed(0)} CZK (underspend)`);
         
         const success = setBudget(data.campaignType, data.name, newBudget);
@@ -165,8 +303,31 @@ function processAccount(accountName, customerId) {
             action: 'DECREASE',
             oldBudget: data.dailyBudget,
             newBudget: newBudget,
-            reason: `Underspend: avg ${data.avgDailySpend.toFixed(0)} CZK/den (${((data.avgDailySpend / data.dailyBudget) * 100).toFixed(0)}% budgetu)`
+            reason: reason
           });
+          
+          // Log do centrálního sheetu
+          logAction(
+            customerId,
+            accountName,
+            'BUDGET_DECREASE',
+            entityName,
+            data.dailyBudget.toFixed(0),
+            newBudget.toFixed(0),
+            reason,
+            'SUCCESS'
+          );
+        } else {
+          logAction(
+            customerId,
+            accountName,
+            'BUDGET_DECREASE',
+            entityName,
+            data.dailyBudget.toFixed(0),
+            newBudget.toFixed(0),
+            'Nepodařilo se změnit budget',
+            'ERROR'
+          );
         }
       }
     }
@@ -333,6 +494,10 @@ function sendNotification(allChanges, accountsProcessed) {
   body += `- Zvýšení: +${((CONFIG.INCREASE_MULTIPLIER - 1) * 100).toFixed(0)}%\n`;
   body += `- Underspend threshold: ${(CONFIG.UNDERSPEND_THRESHOLD * 100).toFixed(0)}%\n`;
   body += `- Min budget: ${CONFIG.MIN_BUDGET} CZK\n`;
+  
+  if (CONFIG.CENTRAL_LOG_SHEET) {
+    body += `\nCentrální log: ${CONFIG.CENTRAL_LOG_SHEET}\n`;
+  }
   
   try {
     MailApp.sendEmail(CONFIG.NOTIFICATION_EMAIL, subject, body);
